@@ -1,0 +1,40 @@
+{
+  "global": {"critical_gas_ppm": 50},
+  "actions": {
+    "APPLY_LOCKOUT": {"requirements": {
+      "power_on": {"equals": false, "hazard": "Machine power is still on", "required_action": "Turn off and isolate machine power"}
+    }},
+    "DEPRESSURIZE": {"requirements": {
+      "isolation_valve_open": {"equals": false, "hazard": "Isolation valve B is still open", "required_action": "Close isolation valve B"},
+      "power_on": {"equals": false, "hazard": "Machine power is still on", "required_action": "Turn off machine power"}
+    }},
+    "VERIFY_ZERO_ENERGY": {"requirements": {
+      "pressure_psi": {"max": 5, "hazard": "Hydraulic pressure is above the 5 PSI safe threshold", "required_action": "Depressurize the hydraulic circuit"},
+      "lockout_applied": {"equals": true, "hazard": "Lockout is not applied", "required_action": "Apply lockout/tagout"}
+    }},
+    "REMOVE_PRESSURE_CAP": {"requirements": {
+      "isolation_valve_open": {"equals": false, "hazard": "Isolation valve B is still open", "required_action": "Close isolation valve B"},
+      "pressure_psi": {"max": 5, "hazard": "Hydraulic line is still pressurized above 5 PSI", "required_action": "Depressurize the hydraulic circuit"},
+      "power_on": {"equals": false, "hazard": "Machine power is still on", "required_action": "Turn off machine power"},
+      "lockout_applied": {"equals": true, "hazard": "Lockout is not applied", "required_action": "Apply lockout/tagout"},
+      "lockout_verified": {"equals": true, "hazard": "Zero-energy lockout has not been verified", "required_action": "Verify the lockout and zero-energy state"}
+    }},
+    "REMOVE_FILTER": {"requirements": {
+      "pressure_cap_removed": {"equals": true, "hazard": "Filter housing is still closed", "required_action": "Remove the pressure cap after completing safety checks"},
+      "pressure_psi": {"max": 5, "hazard": "Hydraulic pressure is above the 5 PSI safe threshold", "required_action": "Depressurize the hydraulic circuit"},
+      "lockout_verified": {"equals": true, "hazard": "Zero-energy lockout has not been verified", "required_action": "Verify the lockout and zero-energy state"}
+    }},
+    "REMOVE_LOCKOUT": {"requirements": {
+      "pressure_cap_removed": {"equals": false, "hazard": "Filter housing has not been reassembled", "required_action": "Install and secure the pressure cap"},
+      "filter_installed": {"equals": true, "hazard": "Replacement filter is not installed", "required_action": "Install the replacement filter"},
+      "work_area_clear": {"equals": true, "hazard": "Tools or personnel remain in the work area", "required_action": "Clear and verify the work area"}
+    }},
+    "START_MACHINE": {"requirements": {
+      "lockout_applied": {"equals": false, "hazard": "Lockout is still applied", "required_action": "Only the authorized worker may remove lockout after reassembly"},
+      "pressure_cap_removed": {"equals": false, "hazard": "Filter housing is open", "required_action": "Install and secure the pressure cap"},
+      "filter_installed": {"equals": true, "hazard": "Filter is not installed", "required_action": "Install the filter"},
+      "work_area_clear": {"equals": true, "hazard": "Work area is not clear", "required_action": "Remove tools and personnel from the hazard zone"},
+      "worker_in_hazard_zone": {"equals": false, "hazard": "Worker is inside the hazard zone", "required_action": "Worker must leave the hazard zone"}
+    }}
+  }
+}

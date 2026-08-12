@@ -1,0 +1,4 @@
+# Deterministic core: standard library only.
+# Dashboard runtime: pip install -e '.[dashboard]'
+# Development: pip install -e '.[dashboard,dev]'
+# Cyberwave (Python 3.10+): pip install -e '.[cyberwave]'

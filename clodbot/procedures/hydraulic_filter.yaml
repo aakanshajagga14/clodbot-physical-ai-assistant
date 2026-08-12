@@ -1,0 +1,17 @@
+{
+  "name": "Hydraulic Filter Replacement",
+  "steps": [
+    {"instruction": "Stop the machine and disconnect power", "action": "TURN_OFF_POWER"},
+    {"instruction": "Apply lockout/tagout", "action": "APPLY_LOCKOUT"},
+    {"instruction": "Close isolation valve B", "action": "CLOSE_ISOLATION_VALVE"},
+    {"instruction": "Depressurize the hydraulic circuit", "action": "DEPRESSURIZE"},
+    {"instruction": "Verify pressure is below 5 PSI and lockout is effective", "action": "VERIFY_ZERO_ENERGY"},
+    {"instruction": "Remove the filter housing pressure cap", "action": "REMOVE_PRESSURE_CAP", "tool": "13 mm wrench"},
+    {"instruction": "Remove the used filter", "action": "REMOVE_FILTER"},
+    {"instruction": "Install the replacement filter", "action": "INSTALL_FILTER"},
+    {"instruction": "Reinstall and torque the pressure cap", "action": "INSTALL_PRESSURE_CAP", "tool": "13 mm torque wrench"},
+    {"instruction": "Remove tools and verify the work area is clear", "action": "VERIFY_WORK_AREA_CLEAR"},
+    {"instruction": "Authorized worker removes lockout/tagout", "action": "REMOVE_LOCKOUT"},
+    {"instruction": "Restart and inspect the system", "action": "START_MACHINE"}
+  ]
+}

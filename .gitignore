@@ -1,0 +1,10 @@
+.env
+.venv/
+.venv-cyberwave/
+.pnpm-store/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.log
+.DS_Store
