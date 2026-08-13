@@ -29,7 +29,6 @@ import {
   X,
 } from "lucide-react";
 import { FormEvent, ReactNode, RefObject, useEffect, useMemo, useRef, useState } from "react";
-import Image from "next/image";
 import CyberwaveRobotViewport, { type RobotGesture } from "./cyberwave-robot-viewport";
 
 type Machine = {
@@ -81,6 +80,15 @@ type SpeechRecognitionInstance = {
   abort: () => void;
 };
 
+const procedureSteps: Step[] = [
+  { number: 1, instruction: "Stop the machine and disconnect power", action: "TURN_OFF_POWER", status: "complete" },
+  { number: 2, instruction: "Apply lockout/tagout", action: "APPLY_LOCKOUT", status: "complete" },
+  { number: 3, instruction: "Close isolation valve B", action: "CLOSE_ISOLATION_VALVE", status: "current" },
+  { number: 4, instruction: "Depressurize the hydraulic circuit", action: "DEPRESSURIZE", status: "pending" },
+  { number: 5, instruction: "Verify pressure is below 5 PSI", action: "VERIFY_ZERO_ENERGY", status: "pending" },
+  { number: 6, instruction: "Remove the pressure cap", action: "REMOVE_PRESSURE_CAP", status: "pending", tool: "13mm wrench" },
+];
+
 const initialWorld: World = {
   revision: 0,
   machine: { name: "Hydraulic Pump A", power_on: false, pressure_psi: 78, isolation_valve_open: true, lockout_applied: true, lockout_verified: false, emergency_stop: false, worker_in_hazard_zone: true, gas_ppm: 0, pressure_cap_removed: false },
@@ -88,15 +96,22 @@ const initialWorld: World = {
   vision: { worker_detected: true, detected_component: "filter_housing", visible_tools: ["13mm_wrench", "screwdriver"], camera_online: true },
   telemetry: { temperature_c: 42.1, vibration_mm_s: 0.35, gas_ppm: 0, sample: 0 },
   prediction: { phase: "idle", action: null, consequence: null, hazard_radius_m: 0, worker_exposed: false, fidelity: "DETERMINISTIC CONSEQUENCE MODEL" },
-  cyberwave: { status: "CONNECTING", mode: "simulation", sdk_version: null, environment_id: null, robot_twin_id: null, camera_twin_id: null, detail: "Connecting to physical-world layer" },
-  procedure: { name: "Hydraulic Filter Replacement", current_step: 3, steps: [] },
-  safety: { action: "REMOVE_PRESSURE_CAP", status: "BLOCKED", authorized: false, hazards: [], required_actions: [], checks: [] },
+  cyberwave: { status: "CONNECTED", mode: "simulation", sdk_version: null, environment_id: "hackathon-demo", robot_twin_id: "the-robot-studio/so101", camera_twin_id: null, detail: "Cyberwave playground simulation" },
+  procedure: { name: "Hydraulic Filter Replacement", current_step: 3, steps: procedureSteps },
+  safety: { action: "REMOVE_PRESSURE_CAP", status: "BLOCKED", authorized: false, hazards: ["Pressurized hydraulic release"], required_actions: ["Close isolation valve B"], checks: [
+    { field: "pressure_psi", passed: false, actual: 78, hazard: "Pressure exceeds 5 PSI" },
+    { field: "isolation_valve_open", passed: false, actual: true, hazard: "Valve B is open" },
+    { field: "power_on", passed: true, actual: false, hazard: "Machine power is on" },
+    { field: "lockout_applied", passed: true, actual: true, hazard: "Lockout is missing" },
+    { field: "lockout_verified", passed: false, actual: false, hazard: "Zero energy is not verified" },
+  ] },
   emergency: "CAUTION",
   current_intent: null,
   events: [],
 };
 
-const API = "http://localhost:8000";
+const PUBLIC_DEMO = import.meta.env.VITE_PUBLIC_DEMO === "true";
+const API = import.meta.env.VITE_CLODBOT_API_URL || "http://localhost:8000";
 const DEFAULT_DEMO_PHOTO: AttachedPhoto = { name: "blue-collar-hydraulic-maintenance.png", url: "/demo/blue-collar-hydraulic-maintenance.png" };
 const fieldLabels: Record<string, string> = { pressure_psi: "Pressure", isolation_valve_open: "Valve B", power_on: "Power", lockout_applied: "Lockout", lockout_verified: "Zero energy" };
 
@@ -114,6 +129,109 @@ function displayActual(field: string, value: unknown) {
 }
 
 function wait(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+function demoSafety(machine: Machine, action = "REMOVE_PRESSURE_CAP") {
+  const checks: SafetyCheck[] = [
+    { field: "pressure_psi", passed: machine.pressure_psi < 5, actual: machine.pressure_psi, hazard: "Pressure exceeds 5 PSI" },
+    { field: "isolation_valve_open", passed: !machine.isolation_valve_open, actual: machine.isolation_valve_open, hazard: "Valve B is open" },
+    { field: "power_on", passed: !machine.power_on, actual: machine.power_on, hazard: "Machine power is on" },
+    { field: "lockout_applied", passed: machine.lockout_applied, actual: machine.lockout_applied, hazard: "Lockout is missing" },
+    { field: "lockout_verified", passed: machine.lockout_verified, actual: machine.lockout_verified, hazard: "Zero energy is not verified" },
+  ];
+  const authorized = checks.every((check) => check.passed);
+  const required_actions = checks.filter((check) => !check.passed).map((check) => ({
+    pressure_psi: "Depressurize the hydraulic circuit",
+    isolation_valve_open: "Close isolation valve B",
+    power_on: "Turn off machine power",
+    lockout_applied: "Apply lockout/tagout",
+    lockout_verified: "Verify zero energy",
+  }[check.field] ?? check.hazard));
+  return { action, status: authorized ? "SAFE" : "BLOCKED", authorized, hazards: authorized ? [] : checks.filter((check) => !check.passed).map((check) => check.hazard), required_actions, checks };
+}
+
+function demoProcedure(machine: Machine): World["procedure"] {
+  const completed = [!machine.power_on, machine.lockout_applied, !machine.isolation_valve_open, machine.pressure_psi < 5, machine.lockout_verified, Boolean(machine.pressure_cap_removed)];
+  const firstPending = Math.max(0, completed.findIndex((value) => !value));
+  return { name: "Hydraulic Filter Replacement", current_step: firstPending + 1, steps: procedureSteps.map((step, index) => ({ ...step, status: completed[index] ? "complete" : index === firstPending ? "current" : "pending" })) };
+}
+
+function demoEvent(world: World, title: string, detail: string, severity = "info"): EventItem[] {
+  return [{ sequence: (world.events[0]?.sequence ?? 0) + 1, timestamp: new Date().toISOString(), kind: "demo", title, detail, severity }, ...world.events].slice(0, 20);
+}
+
+function simulateDemoRequest(world: World, path: string, body: Record<string, unknown> = {}): World {
+  const next = structuredClone(world);
+  const setMachine = (machine: Machine, title: string, detail: string) => {
+    next.machine = machine;
+    next.safety = demoSafety(machine);
+    next.procedure = demoProcedure(machine);
+    next.events = demoEvent(next, title, detail, next.safety.authorized ? "safe" : "info");
+    next.revision += 1;
+  };
+
+  if (path === "/api/reset" || path === "/api/scenario/unsafe") return { ...structuredClone(initialWorld), revision: world.revision + 1, events: demoEvent(world, "Unsafe maintenance loaded", "Hydraulic pressure is 78 PSI and Valve B is open.", "warning") };
+  if (path === "/api/scenario/correct") {
+    const machine = { ...next.machine, power_on: false, pressure_psi: 3, isolation_valve_open: false, lockout_applied: true, lockout_verified: true, gas_ppm: 0, pressure_cap_removed: false };
+    setMachine(machine, "Safe maintenance loaded", "Isolation and zero-energy checks are verified.");
+    return next;
+  }
+  if (path === "/api/scenario/gas") {
+    const machine = { ...next.machine, gas_ppm: 82, worker_in_hazard_zone: true, emergency_stop: true };
+    setMachine(machine, "Critical gas event", "82 ppm detected. Worker evacuation required.");
+    next.emergency = "CRITICAL";
+    return next;
+  }
+  if (path === "/api/scenario/tool") {
+    next.events = demoEvent(next, "Tool assistance ready", "SO-101 identified the 13 mm wrench.");
+    next.robot = { ...next.robot, moving: true, action: "POINT_TO_TOOL", target: "13mm_wrench" };
+    next.revision += 1;
+    return next;
+  }
+  if (path === "/api/worker-zone") {
+    const machine = { ...next.machine, worker_in_hazard_zone: Boolean(body.inside) };
+    setMachine(machine, machine.worker_in_hazard_zone ? "Worker entered hazard zone" : "Worker evacuated", machine.worker_in_hazard_zone ? "Proximity monitoring active." : "Worker is clear of the cell.");
+    return next;
+  }
+  if (path === "/api/emergency/reset") {
+    const machine = { ...next.machine, gas_ppm: 0, emergency_stop: false };
+    setMachine(machine, "Emergency cleared", "Ventilation restored a safe atmosphere.");
+    next.emergency = "CAUTION";
+    return next;
+  }
+  if (path === "/api/robot/point") {
+    next.robot = { ...next.robot, moving: true, action: "POINT_TO_TOOL", target: String(body.target ?? "13mm_wrench") };
+    next.events = demoEvent(next, "Robot guidance", `SO-101 is pointing to ${String(body.target ?? "13mm_wrench").replaceAll("_", " ")}.`);
+    next.revision += 1;
+    return next;
+  }
+  if (path === "/api/intent") {
+    const text = String(body.text ?? "");
+    const toolQuery = /wrench|tool|find|locate/i.test(text);
+    next.current_intent = { text, action: toolQuery ? "LOCATE_TOOL" : "REMOVE_PRESSURE_CAP", confidence: 0.96, category: toolQuery ? "tool" : "maintenance", tool_query: toolQuery ? "13mm_wrench" : null };
+    next.safety = demoSafety(next.machine, toolQuery ? "LOCATE_TOOL" : "REMOVE_PRESSURE_CAP");
+    next.prediction = { ...next.prediction, phase: "complete", action: next.current_intent.action, consequence: next.safety.authorized ? "SAFE MAINTENANCE STEP" : "PRESSURIZED HYDRAULIC RELEASE", hazard_radius_m: next.safety.authorized ? 0 : 1.8, worker_exposed: !next.safety.authorized && next.machine.worker_in_hazard_zone };
+    next.events = demoEvent(next, "Intent analyzed", toolQuery ? "Tool location request is safe to assist." : next.safety.authorized ? "Pressure-cap removal authorized." : "Unsafe action blocked before execution.", next.safety.authorized ? "safe" : "warning");
+    next.revision += 1;
+    return next;
+  }
+  if (path === "/api/action") {
+    const action = String(body.action ?? "");
+    const machine = { ...next.machine };
+    if (action === "TURN_OFF_POWER") machine.power_on = false;
+    if (action === "START_MACHINE") machine.power_on = true;
+    if (action === "CLOSE_ISOLATION_VALVE") machine.isolation_valve_open = false;
+    if (action === "OPEN_ISOLATION_VALVE") machine.isolation_valve_open = true;
+    if (action === "APPLY_LOCKOUT") machine.lockout_applied = true;
+    if (action === "REMOVE_LOCKOUT") { machine.lockout_applied = false; machine.lockout_verified = false; }
+    if (action === "DEPRESSURIZE" && !machine.isolation_valve_open) machine.pressure_psi = 3;
+    if (action === "VERIFY_ZERO_ENERGY" && machine.pressure_psi < 5 && !machine.isolation_valve_open && machine.lockout_applied) machine.lockout_verified = true;
+    if (action === "REMOVE_PRESSURE_CAP" && demoSafety(machine).authorized) machine.pressure_cap_removed = true;
+    setMachine(machine, titleCase(action), `Demo action completed: ${titleCase(action)}.`);
+    next.robot = { ...next.robot, moving: true, action, target: action.includes("TOOL") ? "13mm_wrench" : "filter_housing" };
+    return next;
+  }
+  return next;
+}
 
 function releasePhoto(photo: AttachedPhoto | null) {
   if (photo?.url.startsWith("blob:")) URL.revokeObjectURL(photo.url);
@@ -135,7 +253,7 @@ function gestureForTask(task: string): RobotGesture {
 
 export default function Dashboard() {
   const [world, setWorld] = useState<World>(initialWorld);
-  const [connected, setConnected] = useState(false);
+  const [connected, setConnected] = useState(PUBLIC_DEMO);
   const [prompt, setPrompt] = useState("Can I remove the pressure cap?");
   const [busy, setBusy] = useState(false);
   const [processStage, setProcessStage] = useState<ProcessStage>("idle");
@@ -157,8 +275,12 @@ export default function Dashboard() {
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
   const promptRef = useRef<HTMLInputElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
+  const worldRef = useRef(initialWorld);
+
+  useEffect(() => { worldRef.current = world; }, [world]);
 
   useEffect(() => {
+    if (PUBLIC_DEMO) return;
     let socket: WebSocket | null = null;
     let stopped = false;
     let retry: ReturnType<typeof setTimeout> | null = null;
@@ -223,6 +345,13 @@ export default function Dashboard() {
 
   const post = async (path: string, body?: object) => {
     setError(null);
+    if (PUBLIC_DEMO) {
+      await wait(180);
+      const next = simulateDemoRequest(worldRef.current, path, (body ?? {}) as Record<string, unknown>);
+      worldRef.current = next;
+      setWorld(next);
+      return next;
+    }
     const response = await fetch(`${API}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail ?? "Action rejected");
@@ -406,7 +535,11 @@ function PerceptionColumn({ world, attachedPhoto, commandSequence, commandGestur
   return <aside className="perception-column">
     <ColumnHeading title="Perception" count="3" />
     <VisionFeedCard title="Camera 01" subtitle={attachedPhoto ? "Operator photo · visual context only" : "Cyberwave camera twin"} status={attachedPhoto ? "PHOTO ATTACHED" : world.cyberwave.camera_twin_id && world.vision.camera_online ? "LIVE" : "NOT PAIRED"} className="overview-feed" icon={<Camera size={11} />} disabled={!world.cyberwave.camera_twin_id}>
-      {attachedPhoto ? <div className="attached-camera-photo"><Image src={attachedPhoto.url} alt="Attached workstation evidence" fill unoptimized sizes="240px" /><div><span>{attachedPhoto.name}</span><small>Not used for safety authorization</small></div><button aria-label={`Remove attached photo ${attachedPhoto.name}`} onClick={onRemovePhoto}><X size={12} /></button></div> : <div className="camera-twin-placeholder"><Camera size={19} /><span>Camera twin</span><small>Connect a Cyberwave camera or attach a photo</small></div>}
+      {attachedPhoto ? <div className="attached-camera-photo">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={attachedPhoto.url} alt="Attached workstation evidence" />
+        <div><span>{attachedPhoto.name}</span><small>Not used for safety authorization</small></div><button aria-label={`Remove attached photo ${attachedPhoto.name}`} onClick={onRemovePhoto}><X size={12} /></button>
+      </div> : <div className="camera-twin-placeholder"><Camera size={19} /><span>Camera twin</span><small>Connect a Cyberwave camera or attach a photo</small></div>}
     </VisionFeedCard>
     <VisionFeedCard title="SO-101 Arm" subtitle="Cyberwave catalog twin" status={world.robot.moving ? "MOVING" : "TWIN READY"} className="robot-feed" icon={<Bot size={11} />} onInspect={onRobotInspect}>
       <CyberwaveRobotViewport compact action={world.robot.action} moving={world.robot.moving} commandSequence={commandSequence} commandGesture={commandGesture} agentWorking={agentWorking} viewMode="orbit" />
