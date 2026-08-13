@@ -1,4 +1,5 @@
 # Clodbot
+<img width="2474" height="1576" alt="image" src="https://github.com/user-attachments/assets/22560a43-ba3d-407e-bbb1-74fc8d6b0f8e" />
 
 **Predictive physical AI for industrial worker safety.**
 
