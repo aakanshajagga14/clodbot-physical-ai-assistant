@@ -14,6 +14,7 @@ import {
   LockKeyhole,
   Mic,
   Orbit,
+  Paperclip,
   Power,
   RotateCcw,
   Send,
@@ -22,12 +23,14 @@ import {
   SlidersHorizontal,
   Thermometer,
   UserRound,
+  Volume2,
   Waves,
   Wrench,
   X,
 } from "lucide-react";
-import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import CyberwaveRobotViewport from "./cyberwave-robot-viewport";
+import { FormEvent, ReactNode, RefObject, useEffect, useMemo, useRef, useState } from "react";
+import Image from "next/image";
+import CyberwaveRobotViewport, { type RobotGesture } from "./cyberwave-robot-viewport";
 
 type Machine = {
   name: string;
@@ -64,6 +67,19 @@ type World = {
 type ProcessStage = "idle" | "understanding" | "checking" | "simulating";
 type ViewTab = "live" | "prediction" | "history";
 type ViewMode = "reset" | "orbit";
+type VoiceState = "idle" | "listening" | "ready";
+type AttachedPhoto = { name: string; url: string };
+type SpeechRecognitionInstance = {
+  lang: string;
+  interimResults: boolean;
+  continuous: boolean;
+  onstart: () => void;
+  onend: () => void;
+  onresult: (event: { results: ArrayLike<{ 0: { transcript: string } }> }) => void;
+  onerror: (event: { error?: string }) => void;
+  start: () => void;
+  abort: () => void;
+};
 
 const initialWorld: World = {
   revision: 0,
@@ -81,6 +97,7 @@ const initialWorld: World = {
 };
 
 const API = "http://localhost:8000";
+const DEFAULT_DEMO_PHOTO: AttachedPhoto = { name: "blue-collar-hydraulic-maintenance.png", url: "/demo/blue-collar-hydraulic-maintenance.png" };
 const fieldLabels: Record<string, string> = { pressure_psi: "Pressure", isolation_valve_open: "Valve B", power_on: "Power", lockout_applied: "Lockout", lockout_verified: "Zero energy" };
 
 function titleCase(value: string) {
@@ -98,6 +115,24 @@ function displayActual(field: string, value: unknown) {
 
 function wait(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
+function releasePhoto(photo: AttachedPhoto | null) {
+  if (photo?.url.startsWith("blob:")) URL.revokeObjectURL(photo.url);
+}
+
+function gestureForCommand(command: string): RobotGesture {
+  const normalized = command.toLowerCase();
+  if (/\b(wrench|tool|locate|where|find|point|show me)\b/.test(normalized)) return "guide";
+  if (/\b(emergency|danger|unsafe|stop|remove|release|gas|leak|pressure cap)\b/.test(normalized)) return "caution";
+  return "assess";
+}
+
+function gestureForTask(task: string): RobotGesture {
+  const normalized = task.toLowerCase();
+  if (/robot\/point|tool|wrench|point|filter/.test(normalized)) return "guide";
+  if (/emergency|unsafe|gas|worker-zone|remove|open|stop/.test(normalized)) return "caution";
+  return "assess";
+}
+
 export default function Dashboard() {
   const [world, setWorld] = useState<World>(initialWorld);
   const [connected, setConnected] = useState(false);
@@ -112,7 +147,16 @@ export default function Dashboard() {
   const [procedureOpen, setProcedureOpen] = useState(false);
   const [presentationMode, setPresentationMode] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [voiceState, setVoiceState] = useState<VoiceState>("idle");
+  const [voiceMessage, setVoiceMessage] = useState("Voice input is ready.");
+  const [speaking, setSpeaking] = useState(false);
+  const [robotCommandSequence, setRobotCommandSequence] = useState(0);
+  const [robotGesture, setRobotGesture] = useState<RobotGesture>("assess");
+  const [attachedPhoto, setAttachedPhoto] = useState<AttachedPhoto | null>(DEFAULT_DEMO_PHOTO);
   const predictionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
+  const promptRef = useRef<HTMLInputElement>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let socket: WebSocket | null = null;
@@ -137,6 +181,46 @@ export default function Dashboard() {
     return () => { stopped = true; socket?.close(); if (retry) clearTimeout(retry); if (fallback) clearInterval(fallback); };
   }, []);
 
+  useEffect(() => () => {
+    recognitionRef.current?.abort();
+    window.speechSynthesis?.cancel();
+  }, []);
+
+  useEffect(() => () => {
+    releasePhoto(attachedPhoto);
+  }, [attachedPhoto]);
+
+  const cueRobot = (gesture: RobotGesture) => {
+    setRobotGesture(gesture);
+    setRobotCommandSequence((sequence) => sequence + 1);
+  };
+
+  const attachPhoto = (file: File | null) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setError("Choose an image file such as JPG, PNG, or WebP.");
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      setError("The photo must be 10 MB or smaller.");
+      return;
+    }
+    setError(null);
+    setAttachedPhoto((current) => {
+      releasePhoto(current);
+      return { name: file.name, url: URL.createObjectURL(file) };
+    });
+    cueRobot("assess");
+  };
+
+  const removePhoto = () => {
+    setAttachedPhoto((current) => {
+      releasePhoto(current);
+      return null;
+    });
+    if (photoInputRef.current) photoInputRef.current.value = "";
+  };
+
   const post = async (path: string, body?: object) => {
     setError(null);
     const response = await fetch(`${API}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
@@ -149,6 +233,7 @@ export default function Dashboard() {
   const askClodbot = async (event: FormEvent) => {
     event.preventDefault();
     if (!prompt.trim() || busy) return;
+    cueRobot(gestureForCommand(prompt));
     if (predictionTimer.current) clearTimeout(predictionTimer.current);
     setBusy(true); setShowPrediction(true); setViewTab("prediction"); setProcessStage("understanding");
     const started = Date.now();
@@ -164,6 +249,7 @@ export default function Dashboard() {
   };
 
   const runAction = async (action: string) => {
+    cueRobot(gestureForTask(action));
     setBusy(true);
     try { await post("/api/action", { action }); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Action rejected"); }
@@ -171,6 +257,7 @@ export default function Dashboard() {
   };
 
   const runControl = async (path: string, body?: object) => {
+    cueRobot(gestureForTask(`${path} ${JSON.stringify(body ?? {})}`));
     setBusy(true);
     try { await post(path, body); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Control unavailable"); }
@@ -178,20 +265,64 @@ export default function Dashboard() {
   };
 
   const startVoiceCommand = () => {
+    if (recognitionRef.current) {
+      recognitionRef.current.abort();
+      recognitionRef.current = null;
+      setVoiceState("idle");
+      setVoiceMessage("Voice input stopped. Your current command was kept.");
+      promptRef.current?.focus();
+      return;
+    }
     const browserWindow = window as typeof window & {
-      SpeechRecognition?: new () => { lang: string; interimResults: boolean; onresult: (event: { results: ArrayLike<{ 0: { transcript: string } }> }) => void; onerror: () => void; start: () => void };
-      webkitSpeechRecognition?: new () => { lang: string; interimResults: boolean; onresult: (event: { results: ArrayLike<{ 0: { transcript: string } }> }) => void; onerror: () => void; start: () => void };
+      SpeechRecognition?: new () => SpeechRecognitionInstance;
+      webkitSpeechRecognition?: new () => SpeechRecognitionInstance;
     };
     const Recognition = browserWindow.SpeechRecognition ?? browserWindow.webkitSpeechRecognition;
     if (!Recognition) {
-      setError("Voice commands are not supported by this browser; type the command instead.");
+      const message = "Voice input is not supported by this browser. You can still type and run the command.";
+      setVoiceMessage(message);
+      setError(message);
+      promptRef.current?.focus();
       return;
     }
     const recognition = new Recognition();
+    recognitionRef.current = recognition;
     recognition.lang = "en-US";
     recognition.interimResults = false;
-    recognition.onresult = (event) => setPrompt(event.results[0][0].transcript);
-    recognition.onerror = () => setError("Microphone input could not be started.");
+    recognition.continuous = false;
+    let transcriptReceived = false;
+    recognition.onstart = () => {
+      setError(null);
+      setVoiceState("listening");
+      setVoiceMessage("Listening. Speak your command now, or press Stop listening.");
+    };
+    recognition.onresult = (event) => {
+      transcriptReceived = true;
+      const transcript = event.results[0][0].transcript.trim();
+      setPrompt(transcript);
+      setVoiceState("ready");
+      setVoiceMessage(`Transcription ready: ${transcript}. Review it, then press Run.`);
+      window.setTimeout(() => promptRef.current?.focus(), 0);
+    };
+    recognition.onerror = (event) => {
+      const message = event.error === "not-allowed"
+        ? "Microphone permission was denied. Allow microphone access or type the command instead."
+        : event.error === "no-speech"
+          ? "No speech was detected. Press Speak and try again, or type the command."
+          : "Voice input could not be started. You can type the command instead.";
+      recognitionRef.current = null;
+      setVoiceState("idle");
+      setVoiceMessage(message);
+      setError(message);
+      promptRef.current?.focus();
+    };
+    recognition.onend = () => {
+      recognitionRef.current = null;
+      if (!transcriptReceived) {
+        setVoiceState("idle");
+        setVoiceMessage((message) => message.startsWith("Listening") ? "Listening ended. Press Speak to try again." : message);
+      }
+    };
     recognition.start();
   };
 
@@ -219,17 +350,40 @@ export default function Dashboard() {
       ? `Zero energy is verified. Pressure is ${world.machine.pressure_psi.toFixed(0)} PSI; the maintenance step is authorized.`
       : `The line is still pressurized${world.machine.isolation_valve_open ? " and Valve B is open" : ""}. ${world.safety.required_actions[0] ?? "Complete isolation before continuing"}.`;
 
+  const speakAssistantResponse = () => {
+    if (!("speechSynthesis" in window)) {
+      setError("Spoken responses are not supported by this browser.");
+      return;
+    }
+    if (speaking) {
+      window.speechSynthesis.cancel();
+      setSpeaking(false);
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(assistantText);
+    utterance.lang = "en-US";
+    utterance.rate = 0.92;
+    utterance.onend = () => setSpeaking(false);
+    utterance.onerror = () => {
+      setSpeaking(false);
+      setError("The spoken response could not be played.");
+    };
+    setSpeaking(true);
+    window.speechSynthesis.speak(utterance);
+  };
+
   const predictionActive = showPrediction && Boolean(world.prediction.consequence?.includes("RELEASE"));
 
   return (
     <main className={`desktop-canvas ${presentationMode ? "presentation-mode" : ""}`}>
       <section className="command-shell">
-        <TopCommandBar world={world} connected={connected} prompt={prompt} busy={busy} onPrompt={setPrompt} onSubmit={askClodbot} onVoice={startVoiceCommand} onEvents={() => setEventsOpen(true)} onDemo={() => setDemoOpen(true)} />
+        <TopCommandBar world={world} connected={connected} prompt={prompt} promptRef={promptRef} photoInputRef={photoInputRef} attachedPhoto={attachedPhoto} busy={busy} voiceState={voiceState} voiceMessage={voiceMessage} onPrompt={setPrompt} onSubmit={askClodbot} onVoice={startVoiceCommand} onAttachPhoto={attachPhoto} onEvents={() => setEventsOpen(true)} onDemo={() => setDemoOpen(true)} />
         {world.emergency === "CRITICAL" ? <div className="emergency-line"><CircleAlert size={13} /><b>Critical gas event</b><span>{world.machine.gas_ppm.toFixed(0)} ppm detected</span><button disabled={busy || !world.machine.worker_in_hazard_zone} onClick={() => runControl("/api/worker-zone", { inside: false })}>{world.machine.worker_in_hazard_zone ? "Evacuate worker" : "Worker evacuated"}</button></div> : <div className="emergency-spacer" />}
         <div className="workspace-grid">
-          <PerceptionColumn world={world} onRobotInspect={() => { setViewMode("orbit"); setViewTab("live"); }} />
-          <DigitalTwinWorkspace world={world} viewTab={viewTab} onViewTab={setViewTab} viewMode={viewMode} onViewMode={setViewMode} onExpand={() => setPresentationMode((value) => !value)} predictionActive={predictionActive} processStage={processStage} />
-          <IntelligenceColumn world={world} processStage={processStage} recommendation={recommendation} assistantText={assistantText} busy={busy} error={error} onRecommendation={executeRecommendation} onViewProcedure={() => setProcedureOpen(true)} onDismissError={() => setError(null)} />
+          <PerceptionColumn world={world} attachedPhoto={attachedPhoto} commandSequence={robotCommandSequence} commandGesture={robotGesture} agentWorking={busy} onRemovePhoto={removePhoto} onRobotInspect={() => { setViewMode("orbit"); setViewTab("live"); }} />
+          <DigitalTwinWorkspace world={world} commandSequence={robotCommandSequence} commandGesture={robotGesture} agentWorking={busy} viewTab={viewTab} onViewTab={setViewTab} viewMode={viewMode} onViewMode={setViewMode} onExpand={() => setPresentationMode((value) => !value)} predictionActive={predictionActive} processStage={processStage} />
+          <IntelligenceColumn world={world} processStage={processStage} recommendation={recommendation} assistantText={assistantText} busy={busy} speaking={speaking} error={error} onRecommendation={executeRecommendation} onSpeak={speakAssistantResponse} onViewProcedure={() => setProcedureOpen(true)} onDismissError={() => setError(null)} />
         </div>
       </section>
       <DemoDrawer open={demoOpen} world={world} busy={busy} presentationMode={presentationMode} onPresentation={() => setPresentationMode((value) => !value)} onClose={() => setDemoOpen(false)} onControl={runControl} onAction={runAction} />
@@ -239,23 +393,23 @@ export default function Dashboard() {
   );
 }
 
-function TopCommandBar({ world, connected, prompt, busy, onPrompt, onSubmit, onVoice, onEvents, onDemo }: { world: World; connected: boolean; prompt: string; busy: boolean; onPrompt: (value: string) => void; onSubmit: (event: FormEvent) => void; onVoice: () => void; onEvents: () => void; onDemo: () => void }) {
+function TopCommandBar({ world, connected, prompt, promptRef, photoInputRef, attachedPhoto, busy, voiceState, voiceMessage, onPrompt, onSubmit, onVoice, onAttachPhoto, onEvents, onDemo }: { world: World; connected: boolean; prompt: string; promptRef: RefObject<HTMLInputElement | null>; photoInputRef: RefObject<HTMLInputElement | null>; attachedPhoto: AttachedPhoto | null; busy: boolean; voiceState: VoiceState; voiceMessage: string; onPrompt: (value: string) => void; onSubmit: (event: FormEvent) => void; onVoice: () => void; onAttachPhoto: (file: File | null) => void; onEvents: () => void; onDemo: () => void }) {
   const cyberwaveLabel = world.cyberwave.status === "CONNECTED" ? (world.cyberwave.mode === "live" ? "Live" : "Connected") : "Simulated";
   return <header className="command-bar">
     <div className="brand-lockup"><div className="brand-mark"><Hexagon size={18} strokeWidth={1.7} /><i></i></div><div><strong>Clodbot</strong><span><i className={connected ? "connected" : ""}></i>Maintenance Cell 01</span></div></div>
-    <form className="command-field" onSubmit={onSubmit}><Send size={13} /><input aria-label="Ask Clodbot" value={prompt} onChange={(event) => onPrompt(event.target.value)} placeholder="Ask Clodbot or enter a command…" /><button type="button" aria-label="Voice command" onClick={onVoice}><Mic size={14} /></button><button className="run-command" type="submit" disabled={busy || !prompt.trim()}>Run</button></form>
+    <form className="command-field" onSubmit={onSubmit}><Send size={13} aria-hidden="true" /><button type="button" className={`attach-photo ${attachedPhoto ? "attached" : ""}`} aria-label={attachedPhoto ? `Replace attached photo ${attachedPhoto.name}` : "Attach workstation photo"} title={attachedPhoto ? `Attached: ${attachedPhoto.name}` : "Attach workstation photo"} onClick={() => photoInputRef.current?.click()}><Paperclip size={14} aria-hidden="true" /></button><input ref={photoInputRef} className="sr-only" type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={(event) => onAttachPhoto(event.target.files?.[0] ?? null)} /><input ref={promptRef} aria-label="Ask Clodbot" aria-describedby="voice-instructions voice-status photo-status" value={prompt} onChange={(event) => onPrompt(event.target.value)} placeholder="Ask Clodbot or enter a command…" /><button type="button" className={`voice-command ${voiceState}`} aria-label={voiceState === "listening" ? "Stop listening" : "Speak a command"} aria-pressed={voiceState === "listening"} aria-describedby="voice-instructions voice-status" onClick={onVoice}><Mic size={14} aria-hidden="true" /><span>{voiceState === "listening" ? "Stop" : voiceState === "ready" ? "Speak again" : "Speak"}</span></button><button className="run-command" type="submit" disabled={busy || !prompt.trim()}>Run</button><span id="voice-instructions" className="sr-only">Voice input fills the command field but never runs a safety action automatically. Review the transcription, then press Run.</span><span id="voice-status" className="sr-only" role="status" aria-live="polite">{voiceMessage}</span><span id="photo-status" className="sr-only" role="status" aria-live="polite">{attachedPhoto ? `${attachedPhoto.name} attached as operator visual context. It is not analyzed for safety authorization.` : "No photo attached."}</span></form>
     <div className="command-actions"><div className="compact-status"><span>Simulation</span><b>Active</b></div><div className="compact-status"><span>Cyberwave</span><b><i className={world.cyberwave.status === "CONNECTED" ? "live" : "simulated"}></i>{cyberwaveLabel}</b></div><button aria-label="Notifications" onClick={onEvents}><Bell size={15} /></button><button aria-label="Settings" onClick={onDemo}><Settings size={15} /></button><button aria-label="Open demo controls" onClick={onDemo}><Ellipsis size={17} /></button></div>
   </header>;
 }
 
-function PerceptionColumn({ world, onRobotInspect }: { world: World; onRobotInspect: () => void }) {
+function PerceptionColumn({ world, attachedPhoto, commandSequence, commandGesture, agentWorking, onRemovePhoto, onRobotInspect }: { world: World; attachedPhoto: AttachedPhoto | null; commandSequence: number; commandGesture: RobotGesture; agentWorking: boolean; onRemovePhoto: () => void; onRobotInspect: () => void }) {
   return <aside className="perception-column">
     <ColumnHeading title="Perception" count="3" />
-    <VisionFeedCard title="Camera 01" subtitle="Cyberwave camera twin" status={world.cyberwave.camera_twin_id && world.vision.camera_online ? "LIVE" : "NOT PAIRED"} className="overview-feed" icon={<Camera size={11} />} disabled={!world.cyberwave.camera_twin_id}>
-      <div className="camera-twin-placeholder"><Camera size={19} /><span>Camera twin</span><small>Connect a Cyberwave camera to stream frames</small></div>
+    <VisionFeedCard title="Camera 01" subtitle={attachedPhoto ? "Operator photo · visual context only" : "Cyberwave camera twin"} status={attachedPhoto ? "PHOTO ATTACHED" : world.cyberwave.camera_twin_id && world.vision.camera_online ? "LIVE" : "NOT PAIRED"} className="overview-feed" icon={<Camera size={11} />} disabled={!world.cyberwave.camera_twin_id}>
+      {attachedPhoto ? <div className="attached-camera-photo"><Image src={attachedPhoto.url} alt="Attached workstation evidence" fill unoptimized sizes="240px" /><div><span>{attachedPhoto.name}</span><small>Not used for safety authorization</small></div><button aria-label={`Remove attached photo ${attachedPhoto.name}`} onClick={onRemovePhoto}><X size={12} /></button></div> : <div className="camera-twin-placeholder"><Camera size={19} /><span>Camera twin</span><small>Connect a Cyberwave camera or attach a photo</small></div>}
     </VisionFeedCard>
     <VisionFeedCard title="SO-101 Arm" subtitle="Cyberwave catalog twin" status={world.robot.moving ? "MOVING" : "TWIN READY"} className="robot-feed" icon={<Bot size={11} />} onInspect={onRobotInspect}>
-      <CyberwaveRobotViewport compact action={world.robot.action} moving={world.robot.moving} viewMode="orbit" />
+      <CyberwaveRobotViewport compact action={world.robot.action} moving={world.robot.moving} commandSequence={commandSequence} commandGesture={commandGesture} agentWorking={agentWorking} viewMode="orbit" />
     </VisionFeedCard>
     <ColumnHeading title="System status" count="2" />
     <div className="status-card-grid">
@@ -271,12 +425,12 @@ function VisionFeedCard({ title, subtitle, status, className, icon, children, di
   return <article className="vision-card"><div className={`vision-image ${className}`}>{children}<div className="feed-status"><i></i>{status}</div><span className="scan-corner tl"></span><span className="scan-corner br"></span></div><footer><div><strong>{title}</strong><span>{subtitle}</span></div><button aria-label={`Inspect ${title}`} disabled={disabled} title={disabled ? "No camera twin is paired" : undefined} onClick={onInspect}>{icon}</button></footer></article>;
 }
 
-function DigitalTwinWorkspace({ world, viewTab, onViewTab, viewMode, onViewMode, onExpand, predictionActive, processStage }: { world: World; viewTab: ViewTab; onViewTab: (tab: ViewTab) => void; viewMode: ViewMode; onViewMode: (mode: ViewMode) => void; onExpand: () => void; predictionActive: boolean; processStage: ProcessStage }) {
+function DigitalTwinWorkspace({ world, commandSequence, commandGesture, agentWorking, viewTab, onViewTab, viewMode, onViewMode, onExpand, predictionActive, processStage }: { world: World; commandSequence: number; commandGesture: RobotGesture; agentWorking: boolean; viewTab: ViewTab; onViewTab: (tab: ViewTab) => void; viewMode: ViewMode; onViewMode: (mode: ViewMode) => void; onExpand: () => void; predictionActive: boolean; processStage: ProcessStage }) {
   const viewingPrediction = viewTab === "prediction" || predictionActive;
   return <section className="twin-workspace">
     <header className="workspace-heading"><div><strong>Facility Overview</strong><span>Hydraulic Station A · Cell 01</span></div><nav aria-label="Digital twin views">{(["live", "prediction", "history"] as ViewTab[]).map((tab) => <button key={tab} className={viewTab === tab ? "active" : ""} onClick={() => onViewTab(tab)}>{titleCase(tab)}</button>)}</nav></header>
     <div className={`scene-viewport ${viewMode === "orbit" ? "orbiting" : ""} ${viewingPrediction ? "prediction-view" : ""}`}>
-      <CyberwaveRobotViewport action={world.robot.action} moving={world.robot.moving} viewMode={viewMode} />
+      <CyberwaveRobotViewport action={world.robot.action} moving={world.robot.moving} commandSequence={commandSequence} commandGesture={commandGesture} agentWorking={agentWorking} viewMode={viewMode} />
       <div className="scene-vignette"></div>
       <div className="scene-meta"><span><i></i>{world.cyberwave.status === "CONNECTED" ? (world.cyberwave.mode === "live" ? "CYBERWAVE · LIVE" : "CYBERWAVE · PLAYGROUND") : "SO-101 CATALOG TWIN"}</span><b>SO-101 · 6-DOF</b></div>
       {viewTab === "history" && <div className="history-overlay"><span>RECORDED STATE</span><strong>Latest safety event</strong><small>{world.events[0]?.title ?? "No recorded events"}</small></div>}
@@ -299,7 +453,7 @@ function TelemetryOverlay({ world }: { world: World }) {
 
 function TelemetryItem({ icon, label, value, alert = false }: { icon: ReactNode; label: string; value: string; alert?: boolean }) { return <div className={alert ? "alert" : ""}>{icon}<span>{label}</span><strong>{value}</strong></div>; }
 
-function IntelligenceColumn({ world, processStage, recommendation, assistantText, busy, error, onRecommendation, onViewProcedure, onDismissError }: { world: World; processStage: ProcessStage; recommendation: { label: string; detail: string; action: string }; assistantText: string; busy: boolean; error: string | null; onRecommendation: () => void; onViewProcedure: () => void; onDismissError: () => void }) {
+function IntelligenceColumn({ world, processStage, recommendation, assistantText, busy, speaking, error, onRecommendation, onSpeak, onViewProcedure, onDismissError }: { world: World; processStage: ProcessStage; recommendation: { label: string; detail: string; action: string }; assistantText: string; busy: boolean; speaking: boolean; error: string | null; onRecommendation: () => void; onSpeak: () => void; onViewProcedure: () => void; onDismissError: () => void }) {
   const isSafe = world.safety.status === "SAFE";
   const isCritical = world.emergency === "CRITICAL";
   const checks = world.safety.checks.filter((check) => check.field !== "lockout_verified").slice(0, 4);
@@ -309,8 +463,8 @@ function IntelligenceColumn({ world, processStage, recommendation, assistantText
     <section className={`decision-module ${isCritical ? "critical" : isSafe ? "safe" : "blocked"} ${processStage !== "idle" ? "processing" : ""}`}><header><div><span>Predictive Safety</span><small>{processStage !== "idle" ? "Analyzing physical state" : "Deterministic authorization"}</small></div><ShieldCheck size={15} /></header><div className="decision-status"><div><b>{processStage !== "idle" ? "ANALYZING" : isCritical ? "CRITICAL" : isSafe ? "SAFE" : "BLOCKED"}</b><span>{titleCase(world.safety.action)}</span></div><i>{isSafe ? <Check size={15} /> : <CircleAlert size={15} />}</i></div><div className="consequence"><span>Predicted consequence</span><strong>{consequence}</strong></div><div className="check-table">{checks.map((check) => <div key={check.field}><span>{fieldLabels[check.field] ?? titleCase(check.field)}</span><strong>{displayActual(check.field, check.actual)}</strong><i className={check.passed ? "pass" : "fail"}>{check.passed ? <Check size={10} /> : <CircleAlert size={10} />}</i></div>)}</div></section>
     <button className="next-action" disabled={busy} onClick={onRecommendation}><div><span>Next action</span><strong>{recommendation.label}</strong><small>{recommendation.detail}</small></div><ChevronRight size={15} /></button>
     <ProcedureTimeline world={world} onViewAll={onViewProcedure} />
-    <section className="clodbot-insight"><header><div className="insight-mark"><Hexagon size={14} /><i></i></div><div><strong>Clodbot</strong><span>Physical reasoning</span></div></header><p>{assistantText}</p><button disabled={busy} onClick={onRecommendation}>{world.machine.isolation_valve_open ? "Highlight valve" : "Continue procedure"}<ChevronRight size={12} /></button></section>
-    {error && <div className="inline-error"><CircleAlert size={12} /><span>{error}</span><button onClick={onDismissError}><X size={11} /></button></div>}
+    <section className="clodbot-insight"><header><div className="insight-mark"><Hexagon size={14} /><i></i></div><div><strong>Clodbot</strong><span>Physical reasoning</span></div></header><p>{assistantText}</p><div className="insight-actions"><button className="speak-response" aria-pressed={speaking} aria-label={speaking ? "Stop spoken response" : "Read Clodbot response aloud"} onClick={onSpeak}><Volume2 size={12} aria-hidden="true" />{speaking ? "Stop audio" : "Read aloud"}</button><button disabled={busy} onClick={onRecommendation}>{world.machine.isolation_valve_open ? "Highlight valve" : "Continue procedure"}<ChevronRight size={12} /></button></div></section>
+    {error && <div className="inline-error" role="alert"><CircleAlert size={12} /><span>{error}</span><button aria-label="Dismiss error" onClick={onDismissError}><X size={11} /></button></div>}
   </aside>;
 }
 

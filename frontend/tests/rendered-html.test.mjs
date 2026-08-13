@@ -14,4 +14,18 @@ test("dashboard source contains the flagship safety surfaces", async () => {
   assert.match(source, /Cyberwave/);
   assert.match(source, /api\/intent/);
   assert.match(source, /WebSocket/);
+  assert.match(source, /Stop listening/);
+  assert.match(source, /aria-live="polite"/);
+  assert.match(source, /Read Clodbot response aloud/);
+  assert.match(source, /never runs a safety action automatically/);
+  assert.match(source, /setRobotCommandSequence/);
+  assert.match(source, /commandSequence=\{robotCommandSequence\}/);
+  assert.match(source, /gestureForCommand/);
+  assert.match(source, /"guide"/);
+  assert.match(source, /"caution"/);
+  assert.match(source, /gestureForTask/);
+  assert.match(source, /agentWorking=\{busy\}/);
+  assert.match(source, /Attach workstation photo/);
+  assert.match(source, /visual context only/);
+  assert.match(source, /Not used for safety authorization/);
 });
